@@ -2,52 +2,64 @@ import pdfplumber
 import csv
 import io
 import os
+import re
 from flask import Flask, request, send_file
 
 app = Flask(__name__)
 
+def extract_student_id(cell):
+    match = re.search(r'\b\d{5,}\b', cell)
+    return match.group(0) if match else None
+
 @app.route("/", methods=["POST"])
-def extract_tables_from_pdf():
+def extract_final_grades():
     if 'file' not in request.files:
         return {"error": "No file uploaded"}, 400
 
     pdf_file = request.files['file']
 
     try:
-        all_rows = []
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["Nom", "Note"])  # ⬅️ Seulement deux colonnes
 
         with pdfplumber.open(pdf_file) as pdf:
             for page in pdf.pages:
                 tables = page.extract_tables()
-                if tables:
-                    for table in tables:
-                        # On ne garde que les tableaux avec plusieurs colonnes significatives
-                        if table and len(table[0]) >= 2:
-                            for row in table:
-                                if any(cell and cell.strip() for cell in row):
-                                    all_rows.append(row)
+                for table in tables:
+                    for row in table:
+                        if not row or len(row) < 2:
+                            continue
+                        row = [cell.strip() if cell else "" for cell in row]
 
-        if not all_rows:
-            return {"error": "No valid table rows found"}, 400
+                        # Trouver l'ID étudiant
+                        student_id = None
+                        for cell in row:
+                            student_id = extract_student_id(cell)
+                            if student_id:
+                                break
+                        if not student_id:
+                            continue
 
-        # Création du fichier CSV en mémoire
-        csv_file = io.StringIO()
-        writer = csv.writer(csv_file)
-        for row in all_rows:
-            writer.writerow(row)
+                        # Trouver la note (chiffre à la fin de la ligne)
+                        note = ""
+                        for cell in reversed(row):
+                            if re.match(r"^\d+([.,]\d+)?$", cell):
+                                note = cell.replace(',', '.')
+                                break
 
-        csv_file.seek(0)
+                        writer.writerow([student_id, note])
 
+        output.seek(0)
         return send_file(
-            io.BytesIO(csv_file.getvalue().encode('utf-8')),
+            io.BytesIO(output.getvalue().encode('utf-8')),
             mimetype='text/csv',
             as_attachment=True,
-            download_name='resultat.csv'
+            download_name='notes.csv'
         )
 
     except Exception as e:
         return {"error": str(e)}, 500
 
-# Port requis pour Google Cloud Run
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
